@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema Portaria - Cliente WebRTC</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+        .call-container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: #fff;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            padding: 20px;
+        }
+        .video-container {
+            position: relative;
+            margin: 20px 0;
+            background-color: #000;
+            border-radius: 5px;
+            overflow: hidden;
+            aspect-ratio: 16/9;
+        }
+        #remoteVideo {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        #localVideo {
+            position: absolute;
+            width: 150px;
+            height: 112px;
+            bottom: 20px;
+            right: 20px;
+            border: 2px solid #fff;
+            border-radius: 5px;
+            object-fit: cover;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        .call-status {
+            text-align: center;
+            font-weight: bold;
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .inactive {
+            background-color: #f8f9fa;
+            color: #6c757d;
+        }
+        .incoming {
+            background-color: #cfe2ff;
+            color: #0d6efd;
+            animation: blink 1s infinite;
+        }
+        .connected {
+            background-color: #d1e7dd;
+            color: #198754;
+        }
+        @keyframes blink {
+            50% { background-color: #e2edff; }
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="call-container">
+            <h1 class="text-center mb-4">Sistema de Portaria</h1>
+            
+            <div id="status" class="call-status inactive">Sistema Pronto</div>
+            
+            <div class="video-container">
+                <video id="remoteVideo" autoplay playsinline></video>
+                <video id="localVideo" autoplay playsinline muted></video>
+            </div>
+            
+            <div class="controls">
+                <button id="registerBtn" class="btn btn-primary">Conectar ao Servidor</button>
+                <button id="answerBtn" class="btn btn-success hidden">Atender Chamada</button>
+                <button id="hangupBtn" class="btn btn-danger hidden">Encerrar Chamada</button>
+                <button id="testCallBtn" class="btn btn-secondary">Testar Chamada</button>
+            </div>
+            
+            <div class="mt-4">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="form-group">
+                            <label for="serverInput">Servidor WebSocket:</label>
+                            <input type="text" id="serverInput" class="form-control" value="ws://localhost:8089/ws" />
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-group">
+                            <label for="extensionInput">Extensão:</label>
+                            <input type="text" id="extensionInput" class="form-control" value="1001" />
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="mt-4">
+                <h5>Logs:</h5>
+                <pre id="logs" style="height: 150px; overflow-y: auto; background-color: #f8f9fa; padding: 10px; border-radius: 5px;"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://jssip.net/download/releases/jssip-3.10.0.min.js"></script>
+    <script>
+        // Elementos da UI
+        const registerBtn = document.getElementById('registerBtn');
+        const answerBtn = document.getElementById('answerBtn');
+        const hangupBtn = document.getElementById('hangupBtn');
+        const testCallBtn = document.getElementById('testCallBtn');
+        const serverInput = document.getElementById('serverInput');
+        const extensionInput = document.getElementById('extensionInput');
+        const status = document.getElementById('status');
+        const logs = document.getElementById('logs');
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        
+        // Variáveis globais
+        let phone = null;
+        let currentSession = null;
+        let localStream = null;
+        
+        // Função para adicionar logs
+        function addLog(message) {
+            const now = new Date();
+            const time = now.toLocaleTimeString();
+            logs.textContent += `[${time}] ${message}\n`;
+            logs.scrollTop = logs.scrollHeight;
+        }
+        
+        // Definir status na UI
+        function setStatus(message, type) {
+            status.textContent = message;
+            status.className = 'call-status ' + type;
+        }
+        
+        // Atualizar botões com base no estado
+        function updateButtons(state) {
+            switch(state) {
+                case 'connected':
+                    registerBtn.classList.add('hidden');
+                    answerBtn.classList.add('hidden');
+                    hangupBtn.classList.remove('hidden');
+                    testCallBtn.classList.add('hidden');
+                    break;
+                case 'registered':
+                    registerBtn.classList.add('hidden');
+                    answerBtn.classList.add('hidden');
+                    hangupBtn.classList.add('hidden');
+                    testCallBtn.classList.remove('hidden');
+                    break;
+                case 'incoming':
+                    registerBtn.classList.add('hidden');
+                    answerBtn.classList.remove('hidden');
+                    hangupBtn.classList.add('hidden');
+                    testCallBtn.classList.add('hidden');
+                    break;
+                default: // disconnected
+                    registerBtn.classList.remove('hidden');
+                    answerBtn.classList.add('hidden');
+                    hangupBtn.classList.add('hidden');
+                    testCallBtn.classList.add('hidden');
+            }
+        }
+        
+        // Inicializar mídia
+        async function initMedia() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: true, 
+                    video: true
+                });
+                localVideo.srcObject = localStream;
+                addLog('Mídia local inicializada');
+                return localStream;
+            } catch (err) {
+                addLog('Erro ao acessar mídia: ' + err.message);
+                return null;
+            }
+        }
+        
+        // Conectar ao servidor
+        registerBtn.addEventListener('click', async function() {
+            const server = serverInput.value;
+            const extension = extensionInput.value;
+            
+            await initMedia();
+            
+            // Configuração do JsSIP
+            const socket = new JsSIP.WebSocketInterface(server);
+            const configuration = {
+                sockets: [socket],
+                uri: `sip:${extension}@localhost`,
+                password: 'webrtc123',
+                display_name: 'Cliente WebRTC'
+            };
+            
+            try {
+                phone = new JsSIP.UA(configuration);
+                
+                phone.on('registered', function() {
+                    addLog('Registrado com sucesso no servidor');
+                    setStatus('Conectado ao Servidor', 'connected');
+                    updateButtons('registered');
+                });
+                
+                phone.on('registrationFailed', function(e) {
+                    addLog('Falha no registro: ' + e.cause);
+                    setStatus('Falha na Conexão', 'inactive');
+                    updateButtons('disconnected');
+                });
+                
+                phone.on('newRTCSession', function(e) {
+                    const session = e.session;
+                    currentSession = session;
+                    
+                    if (session.direction === 'incoming') {
+                        addLog('Chamada recebida de: ' + session.remote_identity.uri);
+                        setStatus('Chamada Recebida', 'incoming');
+                        updateButtons('incoming');
+                        
+                        // Configurar eventos da sessão
+                        session.on('accepted', () => {
+                            addLog('Chamada aceita');
+                            setStatus('Em Chamada', 'connected');
+                            updateButtons('connected');
+                        });
+                        
+                        session.on('confirmed', () => {
+                            addLog('Chamada confirmada');
+                        });
+                        
+                        session.on('ended', () => {
+                            addLog('Chamada finalizada');
+                            setStatus('Disponível', 'inactive');
+                            updateButtons('registered');
+                            currentSession = null;
+                        });
+                        
+                        session.on('failed', () => {
+                            addLog('Chamada falhou');
+                            setStatus('Disponível', 'inactive');
+                            updateButtons('registered');
+                            currentSession = null;
+                        });
+                        
+                        // Configurar streams de mídia
+                        session.on('peerconnection', (e) => {
+                            const peerconnection = e.peerconnection;
+                            
+                            peerconnection.addEventListener('track', (e) => {
+                                if (e.track.kind === 'video' || e.track.kind === 'audio') {
+                                    if (e.streams && e.streams[0]) {
+                                        remoteVideo.srcObject = e.streams[0];
+                                    }
+                                }
+                            });
+                        });
+                    }
+                });
+                
+                phone.start();
+                addLog('Conectando ao servidor...');
+                setStatus('Conectando...', 'inactive');
+                
+            } catch (error) {
+                addLog('Erro: ' + error.message);
+            }
+        });
+        
+        // Atender chamada
+        answerBtn.addEventListener('click', function() {
+            if (currentSession) {
+                const options = {
+                    mediaConstraints: {
+                        audio: true,
+                        video: true
+                    },
+                    pcConfig: {
+                        iceServers: [
+                            { urls: ['stun:stun.l.google.com:19302'] }
+                        ]
+                    }
+                };
+                
+                if (localStream) {
+                    options.mediaStream = localStream;
+                }
+                
+                currentSession.answer(options);
+                addLog('Atendendo chamada...');
+            }
+        });
+        
+        // Encerrar chamada
+        hangupBtn.addEventListener('click', function() {
+            if (currentSession) {
+                currentSession.terminate();
+                addLog('Encerrando chamada...');
+                setStatus('Disponível', 'inactive');
+                updateButtons('registered');
+                currentSession = null;
+            }
+        });
+        
+        // Fazer chamada de teste (para a portaria)
+        testCallBtn.addEventListener('click', function() {
+            if (phone && phone.isRegistered()) {
+                const options = {
+                    mediaConstraints: {
+                        audio: true,
+                        video: true
+                    },
+                    pcConfig: {
+                        iceServers: [
+                            { urls: ['stun:stun.l.google.com:19302'] }
+                        ]
+                    }
+                };
+                
+                if (localStream) {
+                    options.mediaStream = localStream;
+                }
+                
+                // Ligar para a portaria (3001)
+                currentSession = phone.call('sip:3001@localhost', options);
+                
+                currentSession.on('connecting', () => {
+                    addLog('Conectando chamada...');
+                    setStatus('Conectando...', 'incoming');
+                });
+                
+                currentSession.on('accepted', () => {
+                    addLog('Chamada aceita');
+                    setStatus('Em Chamada', 'connected');
+                    updateButtons('connected');
+                });
+                
+                currentSession.on('confirmed', () => {
+                    addLog('Chamada confirmada');
+                });
+                
+                currentSession.on('ended', () => {
+                    addLog('Chamada finalizada');
+                    setStatus('Disponível', 'inactive');
+                    updateButtons('registered');
+                    currentSession = null;
+                });
+                
+                currentSession.on('failed', () => {
+                    addLog('Chamada falhou');
+                    setStatus('Disponível', 'inactive');
+                    updateButtons('registered');
+                    currentSession = null;
+                });
+                
+                // Configurar streams de mídia
+                currentSession.on('peerconnection', (e) => {
+                    const peerconnection = e.peerconnection;
+                    
+                    peerconnection.addEventListener('track', (e) => {
+                        if (e.track.kind === 'video' || e.track.kind === 'audio') {
+                            if (e.streams && e.streams[0]) {
+                                remoteVideo.srcObject = e.streams[0];
+                            }
+                        }
+                    });
+                });
+                
+                addLog('Iniciando chamada para a portaria...');
+            } else {
+                addLog('Não conectado ao servidor');
+            }
+        });
+        
+        // Inicializar
+        addLog('Sistema inicializado');
+    </script>
+</body>
+</html> 
